@@ -41,6 +41,11 @@ def create_app(env_name=None):
     # endpoints.MapRazorPages()  (app.UseStaticFiles() is built into Flask: /static)
     app.register_blueprint(pages)
 
+    # telemetry to Azure Application Insights, only when its connection string is set
+    # (an app setting on prod), so tests and local runs send nothing (MIGRATION.md F11)
+    if os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+        enable_telemetry(app)
+
     # asp-append-version="true": add a content hash so browsers refetch changed files
     @app.context_processor
     def versioned_static():
@@ -73,6 +78,20 @@ def create_app(env_name=None):
         return response
 
     return app
+
+
+def enable_telemetry(app):
+    # imported here, so the app starts without them when telemetry is off
+    from azure.monitor.opentelemetry import configure_azure_monitor
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+
+    # the exporter's own INFO logs would be sent as telemetry too, and so on forever
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    # sends logs, errors and dependencies; requests are tracked on this app below
+    # sampling_ratio=1.0 keeps every request (the default rate limit drops the first ones)
+    configure_azure_monitor(sampling_ratio=1.0,
+                            instrumentation_options={"flask": {"enabled": False}})
+    FlaskInstrumentor().instrument_app(app)
 
 
 if __name__ == "__main__":

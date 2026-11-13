@@ -22,6 +22,7 @@ pip install -r requirements-dev.txt
 Environment variables:
 - `APP_ENV`: `Development`, `Production` (default for `waitress-serve`) or `Testing`. Replaces `ASPNETCORE_ENVIRONMENT`.
 - `SECRET_KEY`: signs the CSRF token. Set it when running more than one process/instance; otherwise a random key is generated at startup.
+- `APPLICATIONINSIGHTS_CONNECTION_STRING`: when set (an app setting on prod), requests, errors, logs and a `CategoryCalculated` event go to Azure Application Insights. Not set locally or in tests, so nothing is sent (MIGRATION.md F11).
 
 ## Test
 ```bash

@@ -1,10 +1,13 @@
 """Page handlers - replaces the PageModel classes in Pages/*.cshtml.cs.
 Routes keep the Razor Pages URLs: /, /Privacy and /Error."""
+import logging
+
 from flask import Blueprint, g, make_response, render_template, request
 
 from forms import BloodPressureForm
 
 pages = Blueprint("pages", __name__)
+logger = logging.getLogger(__name__)
 
 
 # Index - was BloodPressureModel (Pages/Index.cshtml.cs)
@@ -17,6 +20,11 @@ def index():
         form = BloodPressureForm(systolic=100, diastolic=60)   # setup initial data
         is_valid = True
     bp = form.to_model() if is_valid else None
+    if request.method == "POST" and bp:
+        # custom event in App Insights: the category only, never the readings (health data)
+        logger.info("Category calculated: %s", bp.category.name, extra={
+            "microsoft.custom_event.name": "CategoryCalculated",
+            "category": bp.category.name})
     return render_template("index.html", form=form, bp=bp)
 
 
