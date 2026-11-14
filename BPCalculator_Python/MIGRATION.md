@@ -37,7 +37,7 @@ The original .NET project is **unchanged** and still in `../BPCalculator`, so bo
 | F2 | URL matching | Case-insensitive (`/privacy` = `/Privacy`) | Case-sensitive: `/Privacy` and `/Error` must be capitalised as before | Flask routes are case-sensitive. All links in the app use the correct case. |
 | F3 | Request ID on error page | W3C trace id (`Activity.Current.Id`) or `TraceIdentifier` | Incoming `X-Request-ID` header or a random UUID | Python has no `Activity`. Same purpose: a correlation id. |
 | F4 | Unhandled errors | Not logged by the template | Logged with stack trace and request id (`app.py:37-38`) | Small improvement. `_logger` was injected in C# but never used. |
-| F5 | HTML5 attributes on inputs | `type="number"` + `data-val-*` | Same, **plus** `min`, `max`, `required` | WTForms adds them automatically. jQuery Validation sets `novalidate` on the form, so users still see the same messages. |
+| F5 | HTML5 attributes on inputs | `type="number"` + `data-val-*` | Same, **plus** `min`, `max`, `required`, and `data-msg-min` / `data-msg-max` (`forms.py:28-31`) | WTForms adds the HTML5 attributes automatically. jQuery Validation sets `novalidate` on the form, but it also reads `min`/`max` as rules of its own, which showed its default text ("Please enter a value less than or equal to 190.") instead of "Invalid Systolic Value". The E2E tests found this; `data-msg-min`/`data-msg-max` now give those rules the ASP.NET message, so users see the same messages as before. |
 | F6 | Anti-forgery field name | `__RequestVerificationToken` | `csrf_token` | Framework naming. A POST without a valid token still gets **HTTP 400** in both. |
 | F7 | Version header and label | None | Every response has `X-App-Version` (commit SHA from the `APP_VERSION` env var, read into config at `config.py:16-17`, `dev` locally) (`app.py:59-64`). The calculator page also shows `Version <short SHA>` in its bottom-right corner, with the full SHA on hover (`app.py:66-69`, `index.html:37`) | The deploy pipeline uses the header to confirm which version is live before marking it stable or after a rollback. The label lets a person check by eye that the latest change is deployed. |
 | F8 | Security headers and cookie flags | None | Every response has CSP, `X-Frame-Options`, `X-Content-Type-Options`, HSTS, `Referrer-Policy`, `Permissions-Policy` and the `Cross-Origin-*` policies (`config.py:21-37`, `app.py:71-78`). Pages also get `Cache-Control: no-cache, no-store, must-revalidate`; static files stay cacheable. The session cookie is `Secure` and `SameSite=Lax`, except in Development and Testing, which use plain HTTP (`config.py:18-20`). The version label's inline style moved to `static/css/version.css`, because the CSP blocks inline styles | Fixes the warnings from the OWASP ZAP scan of stage. Do not use `Referrer-Policy: no-referrer`: Flask-WTF can require a `Referer` on HTTPS POSTs. |
@@ -63,7 +63,7 @@ Everything else (URLs, form field names/ids, validation rules and messages, page
 | `Properties/launchSettings.json` | `app.py:97-99`, `config.py:60-62` | Rewritten |
 | `Pages/_ViewImports.cshtml` | — | Removed: Jinja2 needs no imports / tag-helper registration |
 | `Pages/_ViewStart.cshtml` | `{% extends "base.html" %}` at the top of each template | Replaced |
-| `Pages/Index.cshtml.cs` | `pages.py:13-28`, `forms.py:38-49` | Rewritten |
+| `Pages/Index.cshtml.cs` | `pages.py:13-28`, `forms.py:42-53` | Rewritten |
 | `Pages/Index.cshtml` | `templates/index.html` | Rewritten |
 | `Pages/Privacy.cshtml.cs` | `pages.py:31-34` | Rewritten |
 | `Pages/Privacy.cshtml` | `templates/privacy.html` | Rewritten |
@@ -92,9 +92,9 @@ The C# class mixed **domain logic** (values, category) with **validation** (`[Ra
 | 7-14 | `enum BPCategory` with `[Display(Name=...)]` | 6-11 | `class BPCategory(Enum)` with string values | Display name is now the enum **value** |
 | 16-17 | `public class BloodPressure` | 14-15 | `@dataclass class BloodPressure` | Dataclass generates `__init__`/`__eq__`/`__repr__` |
 | 18-21 | `public const int SystolicMin = 70;` ... | 16-19 | `SYSTOLIC_MIN = 70` ... | PEP 8 constant names; same values |
-| 23 | `[Range(SystolicMin, SystolicMax, ErrorMessage = "Invalid Systolic Value")]` | `forms.py` 19, 33-34 | `NumberRange(minimum, maximum, message=...)` | Validation moved to the form |
+| 23 | `[Range(SystolicMin, SystolicMax, ErrorMessage = "Invalid Systolic Value")]` | `forms.py` 19, 37-38 | `NumberRange(minimum, maximum, message=...)` | Validation moved to the form |
 | 24 | `public int Systolic { get; set; } // mmHG` | 21 | `systolic: int  # mmHg` | Property → dataclass field |
-| 26 | `[Range(DiastolicMin, ...)]` | `forms.py` 19, 35-36 | `NumberRange(...)` | Moved to the form |
+| 26 | `[Range(DiastolicMin, ...)]` | `forms.py` 19, 39-40 | `NumberRange(...)` | Moved to the form |
 | 27 | `public int Diastolic { get; set; }` | 22 | `diastolic: int  # mmHg` | Property → dataclass field |
 | 29-38 | `Category` getter returning `new BPCategory()` | 24-33 | `@property def category(...)` with real logic | **F1: implemented** |
 | — | — | 35-48 | `@property def advice(...)` + `ADVICE` text per category | **New** (F10) |
@@ -249,8 +249,8 @@ Small difference: `UseExceptionHandler` re-runs the `/Error` page and keeps stat
 | 10-11 | `[BindProperty] public BloodPressure BP` | `pages.py` 17; `forms.py` 15-16 | `BloodPressureForm()` binds `request.form`; fields named `BP.Systolic` / `BP.Diastolic` | Model binding → WTForms. **Field names kept the same.** |
 | 14-17 | `OnGet() { BP = new BloodPressure() { Systolic = 100, Diastolic = 60 }; }` | `pages.py` 19-21 | `form = BloodPressureForm(systolic=100, diastolic=60)` | Same defaults |
 | 20 | `OnPost()` | `pages.py` 16-18 | `if request.method == "POST": ... form.validate()` | Handler split → `if` on method |
-| (implicit) | `[Range]` checked during binding → `ModelState` | `forms.py` 11-29, 39 | `InputRequired` + `NumberRange`, `super().validate()` | Explicit validators |
-| 22-26 | `if (!(BP.Systolic > BP.Diastolic)) ModelState.AddModelError("", "...")` | `forms.py` 38-46 | `validate()` override appends to `self.form_errors` | Same check and message. Model-level error ("" key) → `form_errors`. |
+| (implicit) | `[Range]` checked during binding → `ModelState` | `forms.py` 11-33, 43 | `InputRequired` + `NumberRange`, `super().validate()` | Explicit validators |
+| 22-26 | `if (!(BP.Systolic > BP.Diastolic)) ModelState.AddModelError("", "...")` | `forms.py` 42-50 | `validate()` override appends to `self.form_errors` | Same check and message. Model-level error ("" key) → `form_errors`. |
 | 27 | `return Page();` | `pages.py` 22, 28 | `bp = form.to_model() if is_valid else None; return render_template(...)` | Same page is re-rendered |
 | — | — | `pages.py` 23-27 | `logger.info(...)` with `microsoft.custom_event.name = CategoryCalculated` | **New** (F11) |
 
@@ -287,7 +287,7 @@ def index():
     return render_template("index.html", form=form, bp=bp)
 ```
 ```python
-# NEW  forms.py:38-46
+# NEW  forms.py:42-50
 def validate(self, extra_validators=None):
     valid = super().validate(extra_validators)
     if self.systolic.data is not None and self.diastolic.data is not None \
@@ -305,7 +305,7 @@ Validation messages are identical to the original:
 | Field empty | `The Systolic field is required.` / `The Diastolic field is required.` (ASP.NET Core's default text) |
 | Systolic ≤ Diastolic | `Systolic must be greater than Diastolic` |
 
-`forms.py:22-28` writes out the `data-val-*` attributes that Razor's `asp-for` tag helper generated automatically, so the **same** jQuery Unobtrusive Validation scripts work in the browser without changes.
+`forms.py:22-32` writes out the `data-val-*` attributes that Razor's `asp-for` tag helper generated automatically, so the **same** jQuery Unobtrusive Validation scripts work in the browser without changes.
 
 ---
 
@@ -465,6 +465,7 @@ The markup is identical line for line, apart from the new `version.css` link at 
 | `tests/conftest.py` | pytest fixture: creates the app with `TestingConfig` and a test client |
 | `tests/test_bloodpressure.py` | 18 unit tests: every category boundary + display names + advice per category (F10) |
 | `tests/test_telemetry.py` | 4 tests: telemetry off without the connection string and on with it, the `CategoryCalculated` event holds the category but not the readings, no event on page open or for an invalid reading (F11) |
+| `tests/e2e/` | Playwright E2E tests in a real browser against a deployed site (`pytest tests/e2e --base-url <url>`; skipped without it): category and advice for each category, Systolic ≤ Diastolic, and the browser validation messages without a POST. Run on stage by the `e2e-stage` job in `deploy.yml` |
 | `tests/test_app.py` | 11 integration tests: GET defaults, `data-val-*` attributes, valid POST, out-of-range, Systolic ≤ Diastolic, missing value, `/Privacy`, `/Error` no-cache headers, static files + version hash, **CSRF rejection (400)**, **unhandled exception → error page (500)** |
 | `README.md` | Setup, run and test instructions |
 | `MIGRATION.md` | This document |

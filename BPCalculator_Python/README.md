@@ -28,6 +28,12 @@ Environment variables:
 ```bash
 pytest -q
 ```
+E2E tests (a real browser against a running site; skipped by the command above):
+```bash
+python -m playwright install chromium                 # once
+pytest tests/e2e --base-url http://localhost:5000     # or the stage URL
+```
+Locally, run the app with `APP_ENV=Development`: the Production config uses HTTPS-only cookies, so form posts over plain HTTP fail the CSRF check.
 
 ## Docker
 ```bash
@@ -49,7 +55,8 @@ BPCalculator_Python/
 │   ├── _validation_scripts.html   # _ValidationScriptsPartial.cshtml
 │   ├── index.html / privacy.html / error.html
 ├── static/                # wwwroot/ (css, js, favicon, lib/ bootstrap + jquery)
-├── tests/                 # pytest unit + integration tests (new)
+├── tests/                 # pytest unit + integration + BDD tests (new)
+│   └── e2e/                       # Playwright browser tests against a deployed site
 ├── requirements.txt       # runtime dependencies (BPCalculator.csproj)
 └── requirements-dev.txt   # + pytest
 ```

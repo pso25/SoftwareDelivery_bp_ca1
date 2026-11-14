@@ -269,6 +269,52 @@ jobs:
             echo "ZAP report: ${{ steps.pages.outputs.url }}/$GITHUB_SHA/ (latest run: ${{ steps.pages.outputs.url }}/latest/)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # E2E: a real browser (Playwright, Chromium) uses the deployed stage site like a user
+  # would (tests/e2e). A failure blocks production.
+  e2e-stage:
+    needs: deploy-stage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: ${{ env.APP_DIR }}/requirements*.txt
+
+      - name: Install dependencies and Chromium
+        run: |
+          pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
+
+      # without a URL the tests would skip and pass, so fail instead
+      - name: E2E tests on stage
+        env:
+          STAGE_URL: ${{ needs.deploy-stage.outputs.stage-url }}
+        run: |
+          if [ -z "$STAGE_URL" ]; then
+            echo "::error::No stage URL to test"
+            exit 1
+          fi
+          pytest -v tests/e2e --base-url "$STAGE_URL" \
+            --tracing retain-on-failure --screenshot only-on-failure \
+            --output e2e-results --junitxml=e2e-results.xml
+
+      # traces and screenshots of failed tests (open a trace at trace.playwright.dev)
+      - name: Upload E2E results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            ${{ env.APP_DIR }}/e2e-results.xml
+            ${{ env.APP_DIR }}/e2e-results/
+          if-no-files-found: ignore
+
   # these two only add a clickable report link to the job box in the run graph,
   # the same way the deploy jobs show the site URL
   k6-report:
@@ -293,10 +339,10 @@ jobs:
 
   # tells Slack that stage passed, ZAP has run and production is waiting for approval
   notify-approval:
-    needs: [deploy-stage, zap-scan]
+    needs: [deploy-stage, zap-scan, e2e-stage]
     # waits for the ZAP report, so it can be read before approving;
-    # ZAP is report only, so a failed scan does not stop this
-    if: ${{ !cancelled() && needs.deploy-stage.result == 'success' }}
+    # ZAP is report only, so a failed scan does not stop this; E2E must pass
+    if: ${{ !cancelled() && needs.deploy-stage.result == 'success' && needs.e2e-stage.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -349,6 +395,7 @@ jobs:
           ✅ Test - health check passed
           ✅ Stage - health check passed
           ✅ k6 - p95 ${K6_P95} ms (limit 1000 ms), failed requests ${K6_FAILED}% (limit 1%)
+          ✅ E2E - browser tests passed on stage
           $zap_line
           ⏳ Production - waiting for approval" \
             "Review and approve=$run_url" \
@@ -358,10 +405,10 @@ jobs:
 
   # a required reviewer on the production environment makes this job wait for approval
   deploy-prod:
-    needs: [deploy-stage, zap-scan]
+    needs: [deploy-stage, zap-scan, e2e-stage]
     # waits for the ZAP report, so it can be read before approving;
-    # ZAP is report only, so a failed scan does not stop this
-    if: ${{ !cancelled() && needs.deploy-stage.result == 'success' }}
+    # ZAP is report only, so a failed scan does not stop this; E2E must pass
+    if: ${{ !cancelled() && needs.deploy-stage.result == 'success' && needs.e2e-stage.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -581,7 +628,7 @@ jobs:
 
   # final Slack message: live, rolled back, or the stage where the deploy stopped
   notify-result:
-    needs: [ci, build-and-push, deploy-test, deploy-stage, zap-scan, deploy-prod, swap-prod]
+    needs: [ci, build-and-push, deploy-test, deploy-stage, e2e-stage, zap-scan, deploy-prod, swap-prod]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -594,6 +641,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build-and-push.result }}
           TEST_RESULT: ${{ needs.deploy-test.result }}
           STAGE_RESULT: ${{ needs.deploy-stage.result }}
+          E2E_RESULT: ${{ needs.e2e-stage.result }}
           SWAP_RESULT: ${{ needs.swap-prod.result }}
           PROD_RESULT: ${{ needs.swap-prod.result != 'skipped' && needs.swap-prod.result || needs.deploy-prod.result }}
           K6_RESULT: ${{ needs.deploy-stage.outputs.k6-result }}
@@ -631,6 +679,8 @@ jobs:
             stages+="
           $(icon "$K6_RESULT") k6 - p95 ${K6_P95:-?} ms (limit 1000 ms), failed requests ${K6_FAILED:-?}% (limit 1%)"
           fi
+          stages+="
+          $(icon "$E2E_RESULT") E2E - browser tests on stage"
           if [ "$ZAP_RESULT" = "success" ]; then
             stages+="
           🔒 ZAP - ${ZAP_PASSED:-?} passed, ${ZAP_HIGH:-?} High, ${ZAP_MEDIUM:-?} Medium, ${ZAP_LOW:-?} Low"
@@ -644,7 +694,7 @@ jobs:
           # first stage that did not succeed
           stopped=""
           for stage in "CI checks:$CI_RESULT" "Build and push:$BUILD_RESULT" "Test:$TEST_RESULT" \
-                       "Stage:$STAGE_RESULT" "Production:$PROD_RESULT"; do
+                       "Stage:$STAGE_RESULT" "E2E tests:$E2E_RESULT" "Production:$PROD_RESULT"; do
             if [ "${stage#*:}" != "success" ]; then
               stopped="${stage%:*}"
               break
