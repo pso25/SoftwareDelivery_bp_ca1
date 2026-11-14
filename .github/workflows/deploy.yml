@@ -21,6 +21,8 @@ env:
   APP_DIR: BPCalculator_Python
   RESOURCE_GROUP: TUD-Continous-Delivery
   SLOT_NAME: staging
+  # read by the telemetry check after each production release
+  APPINSIGHTS_NAME: bpcalc-insights
 
 jobs:
   # all CI checks (tests, coverage, code analysis, security, Docker) - see ci.yml
@@ -413,11 +415,11 @@ jobs:
     environment:
       name: production
       url: ${{ steps.deploy.outputs.webapp-url || steps.sites.outputs.live-url }}
-    # id-token: write lets the slot path log in to Azure with OIDC
+    # id-token: write lets this job log in to Azure with OIDC
     permissions:
       contents: read
       id-token: write
-    # site and automatic rollback result for the Slack message;
+    # site, telemetry check and automatic rollback result for the Slack message;
     # use-slots passes USE_SLOTS on, because a job's own "if" can't read environment variables
     outputs:
       url: ${{ steps.deploy.outputs.webapp-url || steps.sites.outputs.live-url }}
@@ -425,6 +427,8 @@ jobs:
       rollback-version: ${{ steps.stable.outputs.version || steps.sites.outputs.live-version }}
       use-slots: ${{ vars.USE_SLOTS }}
       live-version: ${{ steps.sites.outputs.live-version }}
+      telemetry-result: ${{ steps.telemetry.outcome }}
+      telemetry-line: ${{ steps.telemetry.outputs.line }}
     steps:
       - uses: actions/checkout@v4
 
@@ -432,6 +436,15 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # before any change, so a failed login leaves production untouched;
+      # the slot path manages the slot with it, the normal path reads telemetry
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # ---- normal path: deploy straight onto the live site ----
 
@@ -445,21 +458,23 @@ jobs:
           # the commit-SHA tag makes App Service pull exactly the image just built
           images: index.docker.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      # waits for the new version to be live, then checks the pages
+      # waits for the new version to be live, then checks the pages;
+      # live-since is where the telemetry check starts counting
       - name: Health check
         id: health
         if: vars.USE_SLOTS != 'true'
-        run: bash .github/scripts/health-check.sh "${{ steps.deploy.outputs.webapp-url }}" "${{ github.sha }}"
+        run: |
+          bash .github/scripts/health-check.sh "${{ steps.deploy.outputs.webapp-url }}" "${{ github.sha }}"
+          echo "live-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # continuous telemetry monitoring: the new version's own telemetry in Application
+      # Insights must show requests and no server errors or exceptions, or it is rolled back
+      - name: Telemetry check
+        id: telemetry
+        if: vars.USE_SLOTS != 'true'
+        run: bash .github/scripts/telemetry-check.sh "${{ steps.deploy.outputs.webapp-url }}" "${{ steps.health.outputs.live-since }}"
 
       # ---- slot path: deploy to the slot and check it; swap-prod does the swap ----
-
-      - name: Azure login
-        if: vars.USE_SLOTS == 'true'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # the live version is what a swap back must restore
       - name: Find site addresses and live version
@@ -525,11 +540,11 @@ jobs:
             echo "Site: ${{ steps.deploy.outputs.webapp-url }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ---- automatic rollback: only if the deploy or the health check failed ----
+      # ---- automatic rollback: only if the deploy, the health check or the telemetry check failed ----
 
       - name: Find last stable version
         id: stable
-        if: failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure')
+        if: failure() && (steps.deploy.outcome == 'failure' || steps.health.outcome == 'failure' || steps.telemetry.outcome == 'failure')
         run: |
           if ! docker pull -q ${{ env.IMAGE_NAME }}:stable; then
             echo "::error::No stable image yet, nothing to roll back to"
@@ -573,6 +588,8 @@ jobs:
       id-token: write
     outputs:
       swap-back-result: ${{ steps.swap-back.outcome }}
+      telemetry-result: ${{ steps.telemetry.outcome }}
+      telemetry-line: ${{ steps.telemetry.outputs.line }}
     steps:
       - uses: actions/checkout@v4
 
@@ -595,7 +612,14 @@ jobs:
 
       - name: Health check after swap
         id: swap-health
-        run: bash .github/scripts/health-check.sh "${{ needs.deploy-prod.outputs.url }}" "${{ github.sha }}"
+        run: |
+          bash .github/scripts/health-check.sh "${{ needs.deploy-prod.outputs.url }}" "${{ github.sha }}"
+          echo "live-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # continuous telemetry monitoring, as in deploy-prod; a failure swaps back
+      - name: Telemetry check
+        id: telemetry
+        run: bash .github/scripts/telemetry-check.sh "${{ needs.deploy-prod.outputs.url }}" "${{ steps.swap-health.outputs.live-since }}"
 
       - name: Mark this version as stable
         run: bash .github/scripts/mark-stable.sh "${{ env.IMAGE_NAME }}" "${{ github.sha }}"
@@ -612,7 +636,7 @@ jobs:
 
       - name: Swap back
         id: swap-back
-        if: failure() && steps.swap-health.outcome == 'failure'
+        if: failure() && (steps.swap-health.outcome == 'failure' || steps.telemetry.outcome == 'failure')
         run: |
           az webapp deployment slot swap -g "$RESOURCE_GROUP" -n "${{ vars.AZURE_WEBAPP_NAME }}" \
             --slot "$SLOT_NAME" --target-slot production
@@ -658,6 +682,8 @@ jobs:
           PROD_URL: ${{ needs.deploy-prod.outputs.url }}
           ROLLBACK_RESULT: ${{ needs.swap-prod.outputs.swap-back-result == 'success' && 'success' || needs.deploy-prod.outputs.rollback-result }}
           ROLLBACK_VERSION: ${{ needs.deploy-prod.outputs.rollback-version }}
+          TELEMETRY_RESULT: ${{ needs.swap-prod.result != 'skipped' && needs.swap-prod.outputs.telemetry-result || needs.deploy-prod.outputs.telemetry-result }}
+          TELEMETRY_LINE: ${{ needs.swap-prod.result != 'skipped' && needs.swap-prod.outputs.telemetry-line || needs.deploy-prod.outputs.telemetry-line }}
         run: |
           icon() {
             case "$1" in
@@ -690,6 +716,13 @@ jobs:
           fi
           stages+="
           $(icon "$PROD_RESULT") Production"
+          if [ -n "$TELEMETRY_LINE" ]; then
+            stages+="
+          $(icon "$TELEMETRY_RESULT") 📈 Telemetry - $TELEMETRY_LINE"
+          elif [ "$TELEMETRY_RESULT" = "failure" ]; then
+            stages+="
+          ❌ 📈 Telemetry - could not read Application Insights"
+          fi
 
           # first stage that did not succeed
           stopped=""
