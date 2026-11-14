@@ -25,6 +25,10 @@ def _bp_field(label, minimum, maximum, error_message):
             "data-val-range": error_message,
             "data-val-range-min": str(minimum),
             "data-val-range-max": str(maximum),
+            # jQuery Validation also reads the HTML min/max attributes; give them
+            # the ASP.NET message instead of its own default text (MIGRATION.md F5)
+            "data-msg-min": error_message,
+            "data-msg-max": error_message,
         },
     )
 

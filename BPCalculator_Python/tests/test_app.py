@@ -18,6 +18,9 @@ def test_index_renders_unobtrusive_validation_attributes(client):
     html = client.get("/").get_data(as_text=True)
     assert 'data-val-range="Invalid Systolic Value"' in html
     assert 'data-val-range-min="70"' in html and 'data-val-range-max="190"' in html
+    # the HTML min/max attributes get the same message (see MIGRATION.md F5)
+    assert 'data-msg-max="Invalid Systolic Value"' in html
+    assert 'data-msg-min="Invalid Diastolic Value"' in html
     assert "jquery.validate.unobtrusive.min.js" in html
 
 
