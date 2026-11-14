@@ -21,6 +21,7 @@ waitress-serve --port=5000 --call app:create_app    # production-style (APP_ENV 
 pytest -q                                           # all tests
 pytest tests/test_bloodpressure.py::test_category   # single test
 pytest -k "csrf"                                     # by name
+pytest tests/e2e --base-url http://localhost:5000   # E2E in a browser (needs `python -m playwright install chromium`; skipped without --base-url)
 
 docker build -t bpcalculator .
 docker run -d -p 5000:5000 --name bpcalculator bpcalculator
